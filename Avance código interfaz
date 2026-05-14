@@ -1,0 +1,1475 @@
+from tkinter import *
+from tkinter import messagebox
+import requests
+import threading
+import time
+import random
+import json
+import os
+
+# ─── Config global ────────────────────────────────────────────
+PICO_IP = None
+INTERVALO = 0.4
+
+UNIDADES = {"A": 0.2, "B": 0.3}
+unidad_actual = "A"
+
+MODO_JUEGO = None  # "TRANSMISION" o "ESCUCHA"
+ARCHIVO_FRASES = "frases.json"
+ARCHIVO_PUNTAJES = "puntajes.json"
+
+def Get_unidad():
+    return UNIDADES[unidad_actual]
+
+# ─── Gestión de frases ────────────────────────────────────────
+PALABRAS_DEFECTO = ["SOS", "SI", "NO", "POLLO", "PERRO", "CE1104", "AMOR", "PYTHON", "TEC", "ELEVEN"]
+
+def Cargar_frases():
+    if os.path.exists(ARCHIVO_FRASES):
+        try:
+            with open(ARCHIVO_FRASES, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data if isinstance(data, list) and len(data) > 0 else PALABRAS_DEFECTO.copy()
+        except:
+            return PALABRAS_DEFECTO.copy()
+    return PALABRAS_DEFECTO.copy()
+
+def Guardar_frases(frases):
+    frases = [f.strip().upper()[:16] for f in frases if f.strip()]
+    while len(frases) < 10:
+        frases.append(f"FRASE{len(frases)+1}")
+    with open(ARCHIVO_FRASES, 'w', encoding='utf-8') as f:
+        json.dump(frases[:10], f, ensure_ascii=False, indent=2)
+
+def Cargar_puntajes():
+    if os.path.exists(ARCHIVO_PUNTAJES):
+        try:
+            with open(ARCHIVO_PUNTAJES, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def Guardar_puntajes(puntajes):
+    with open(ARCHIVO_PUNTAJES, 'w', encoding='utf-8') as f:
+        json.dump(puntajes, f, ensure_ascii=False, indent=2)
+
+def Agregar_puntaje(nombre, puntos, modo, ronda):
+    puntajes = Cargar_puntajes()
+    puntajes.append({
+        "nombre": nombre,
+        "puntos": puntos,
+        "modo": modo,
+        "ronda": ronda,
+        "fecha": time.strftime("%Y-%m-%d %H:%M:%S")
+    })
+    puntajes.sort(key=lambda x: x["puntos"], reverse=True)
+    puntajes = puntajes[:10]
+    Guardar_puntajes(puntajes)
+    return puntajes
+
+def Obtener_top10():
+    return Cargar_puntajes()
+
+# ─── Palabras del juego ───────────────────────────────────────
+PALABRAS = Cargar_frases()
+
+# ─── Diccionario morse ────────────────────────────────────────
+MORSE_A_TEXTO = {
+    ".-": "A",    "-...": "B",  "-.-.": "C",  "-..": "D",
+    ".": "E",     "..-.": "F",  "--.": "G",   "....": "H",
+    "..": "I",    ".---": "J",  "-.-": "K",   ".-..": "L",
+    "--": "M",    "-.": "N",    "---": "O",   ".--.": "P",
+    "--.-": "Q",  ".-.": "R",   "...": "S",   "-": "T",
+    "..-": "U",   "...-": "V",  ".--": "W",   "-..-": "X",
+    "-.--": "Y",  "--..": "Z",
+    ".----": "1", "..---": "2", "...--": "3", "....-": "4",
+    ".....": "5", "-....": "6", "--...": "7", "---..": "8",
+    "----.": "9", "-----": "0",
+}
+
+TEXTO_A_MORSE = {v: k for k, v in MORSE_A_TEXTO.items()}
+
+def Decodificar_simbolo(simbolo):
+    return MORSE_A_TEXTO.get(simbolo, '')
+
+def Decodificar_cadena(morse):
+    resultado = ''
+    for simbolo in morse.split():
+        resultado += Decodificar_simbolo(simbolo)
+    return resultado
+
+def Codificar_cadena(texto):
+    resultado = []
+    for char in texto.upper():
+        if char in TEXTO_A_MORSE:
+            resultado.append(TEXTO_A_MORSE[char])
+        elif char == ' ':
+            resultado.append('/')
+    return ' '.join(resultado)
+
+# ─── HTTP ─────────────────────────────────────────────────────
+def Enviar_comando(ruta):
+    """Envía un comando HTTP GET a la Pico W"""
+    if PICO_IP is None:
+        return None
+    
+    try:
+        r = requests.get(f'{PICO_IP}/{ruta}', timeout=4)
+        clean_r = r.text.strip()
+        return clean_r
+    except Exception as e:
+        print(f'Error de conexión: {e}')
+        return None
+
+def Enviar_frase_a_pico(frase):
+    """Envía una frase específica a la Pico W para que la almacene"""
+    if PICO_IP is None:
+        return False
+    
+    try:
+        morse_frase = Codificar_cadena(frase)
+        comando = f'SET_FRASE/{frase}/{morse_frase}'
+        respuesta = Enviar_comando(comando)
+        return respuesta is not None
+    except:
+        return False
+
+def Conectar(Ent_ip, Lbl_conexion):
+    global PICO_IP
+    ip = Ent_ip.get().strip()
+    if not ip:
+        Lbl_conexion.config(text='Ingresa una IP', fg=COLOR_ACENTO)
+        return
+
+    PICO_IP = f'http://{ip}'
+    respuesta = Enviar_comando('LED_ON')
+    if respuesta is not None:
+        Lbl_conexion.config(text=f'Conectado a {ip}', fg=COLOR_VERDE)
+    else:
+        Lbl_conexion.config(text='No se pudo conectar', fg=COLOR_ACENTO)
+        PICO_IP = None
+
+def Cambiar_unidad(Var_unidad, Lbl_vel_info):
+    global unidad_actual
+    unidad_actual = Var_unidad.get()
+    u = Get_unidad()
+    Lbl_vel_info.config(text=f'1U={u:.1f}s  -  raya>={u*2:.1f}s  -  letra>{u*3:.1f}s  -  palabra>{u*7:.1f}s')
+
+def Iniciar_Juego_Escucha(Ent_j1, Ent_j2, Lbl_error):
+    global nombre_j1, nombre_j2, MODO_JUEGO
+    nombre_j1 = Ent_j1.get().strip()
+    nombre_j2 = Ent_j2.get().strip()
+    if not nombre_j1:
+        Lbl_error.config(text="Ingresa el nombre del Jugador 1")
+        return
+    if not nombre_j2:
+        Lbl_error.config(text="Ingresa el nombre del Jugador 2")
+        return
+
+    MODO_JUEGO = "ESCUCHA"
+    Reiniciar_pantalla_juego()
+    CambiarPantalla(Contenedor_Pantalla_Juego)
+
+def Iniciar_Juego_Transmision(Ent_j1, Lbl_error):
+    global nombre_j1, MODO_JUEGO
+    nombre_j1 = Ent_j1.get().strip()
+    if not nombre_j1:
+        Lbl_error.config(text="Ingresa tu nombre")
+        return
+
+    MODO_JUEGO = "TRANSMISION"
+    
+    # Enviar frases disponibles a la Pico W para que las tenga preparadas
+    frases_enviadas = 0
+    for frase in PALABRAS[:3]:  # Solo las primeras 3 para las rondas
+        if Enviar_frase_a_pico(frase):
+            frases_enviadas += 1
+    
+    if frases_enviadas == 0:
+        Lbl_error.config(text="Error: No se pudieron enviar frases a Pico W")
+        return
+    
+    Reiniciar_pantalla_transmision()
+    CambiarPantalla(Contenedor_Pantalla_Transmision)
+
+def CambiarPantalla(nueva):
+    global pantalla_actual
+    pantalla_actual.pack_forget()
+    nueva.pack(fill=BOTH, expand=True)
+    pantalla_actual = nueva
+
+# Colores y estilos
+BG = "#0c0710"
+COLOR_PANEL = "#180e24"
+COLOR_ACENTO = "#ff1e3c"
+COLOR_ACENTO2 = "#9d1a34"
+COLOR_TEXTO = "#f3e6d1"
+COLOR_GRIS = "#8c7d8b"
+COLOR_VERDE = "#53d96a"
+COLOR_AMARILLO = "#f7d35a"
+FUENTE = 'Minecraft'
+FONT_TITLE = (FUENTE, 24, "bold")
+FONT_GRANDE = (FUENTE, 16, "bold")
+FONT_MEDIANA = (FUENTE, 12)
+FONT_PUEQUENA = (FUENTE, 10)
+
+IMG_FONDO_PATH = "stranger_things_bg.png"
+IMG_FONDO = None
+
+def Cargar_imagen_fondo():
+    global IMG_FONDO
+    if IMG_FONDO is not None:
+        return IMG_FONDO
+    try:
+        IMG_FONDO = PhotoImage(file=IMG_FONDO_PATH)
+    except Exception:
+        IMG_FONDO = None
+    return IMG_FONDO
+
+
+def Configurar_fondo(padre):
+    fondo = Cargar_imagen_fondo()
+    if fondo:
+        lbl = Label(padre, image=fondo, bg=BG)
+        lbl.image = fondo
+        lbl.place(relx=0, rely=0, relwidth=1, relheight=1)
+    overlay = Frame(padre, bg=BG)
+    overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+
+def Ajustar_color(color_hex, factor=0.88):
+    """Oscurece un color hexadecimal para el efecto hover."""
+    if not color_hex.startswith('#') or len(color_hex) != 7:
+        return color_hex
+    try:
+        r = int(color_hex[1:3], 16)
+        g = int(color_hex[3:5], 16)
+        b = int(color_hex[5:7], 16)
+    except ValueError:
+        return color_hex
+
+    def clamp(value):
+        return max(0, min(255, int(value)))
+
+    r = clamp(r * factor)
+    g = clamp(g * factor)
+    b = clamp(b * factor)
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+
+def Crear_boton(padre, texto, comando, bg_color=COLOR_ACENTO, fg_color=COLOR_TEXTO, ancho=24,
+                 font=FONT_MEDIANA, padx=18, pady=10, **kwargs):
+    hover_bg = Ajustar_color(bg_color, 0.90)
+    btn = Button(padre, text=texto, command=comando,
+                 bg=bg_color, fg=fg_color,
+                 font=font, relief=FLAT,
+                 activebackground=hover_bg, activeforeground=COLOR_TEXTO,
+                 bd=0, highlightthickness=0, padx=padx, pady=pady, width=ancho,
+                 cursor='hand2', **kwargs)
+    default_bg = bg_color
+    btn.bind("<Enter>", lambda e, b=btn: b.config(bg=hover_bg))
+    btn.bind("<Leave>", lambda e, b=btn, bg=default_bg: b.config(bg=default_bg))
+    return btn
+
+
+def Crear_contenedor_scrollable(padre):
+    frame_scroll = Frame(padre, bg=BG)
+    canvas = Canvas(frame_scroll, bg=BG, highlightthickness=0)
+    scrollbar = Scrollbar(frame_scroll, orient=VERTICAL, command=canvas.yview)
+    inner_frame = Frame(canvas, bg=BG)
+
+    window_id = canvas.create_window((0, 0), window=inner_frame, anchor='nw')
+    inner_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfig(window_id, width=e.width))
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    canvas.pack(side=LEFT, fill=BOTH, expand=True)
+    scrollbar.pack(side=RIGHT, fill=Y)
+    return frame_scroll, inner_frame
+
+nombre_j1 = ''
+nombre_j2 = ""
+turno_actual = 1  # 1 para J1, 2 para J2
+ronda_actual = 1
+
+Lbl_morse_raw = None
+Lbl_boton_texto = None
+Lbl_simbolos = None
+Lbl_char_actual = None
+Lbl_teclado_texto = None
+Lbl_estado_tec = None
+
+
+# ======== VENTANA PRINCIPAL ===============
+VENTANA = Tk()
+Contenedor_Pantalla_Menu = Frame(VENTANA, bg=BG)
+Contenedor_Pantalla_Menu.pack(fill=BOTH, expand=True)
+pantalla_actual = Contenedor_Pantalla_Menu
+
+VENTANA.title('STRANGER TEC - BATALLA MORSE')
+VENTANA.configure(bg=BG)
+VENTANA.resizable(False, False)
+VENTANA.geometry("600x520")
+
+
+# ─── Pantalla de Menú Principal ───────────────────────────────
+def Crear_pantalla_menu():
+    for w in Contenedor_Pantalla_Menu.winfo_children():
+        w.destroy()
+    Configurar_fondo(Contenedor_Pantalla_Menu)
+    Frm_menu_scroll_frame, Contenedor_menu_scroll = Crear_contenedor_scrollable(Contenedor_Pantalla_Menu)
+    Frm_menu_scroll_frame.pack(fill=BOTH, expand=True)
+    
+    Lbl_titulo = Label(Contenedor_menu_scroll, text='BATALLA MORSE', font=FONT_TITLE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_titulo.pack(pady=(40, 4))
+    
+    Lbl_subtitulo = Label(Contenedor_menu_scroll, text='Menu Principal', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_subtitulo.pack(pady=4)
+    
+    Lbl_sep = Label(Contenedor_menu_scroll, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_sep.pack(pady=(4, 20))
+    
+    Frm_botones_menu = Frame(Contenedor_menu_scroll, bg=BG)
+    Frm_botones_menu.pack(pady=20)
+    
+    def Ir_a_modo_juego():
+        CambiarPantalla(Contenedor_Pantalla_ModoJuego)
+    
+    def Ir_a_frases():
+        CambiarPantalla(Contenedor_Pantalla_Frases)
+    
+    def Ir_a_top10():
+        CambiarPantalla(Contenedor_Pantalla_Top10)
+    
+    Btn_jugar = Crear_boton(Frm_botones_menu, '▶  JUGAR', Ir_a_modo_juego, bg_color=COLOR_ACENTO, fg_color='white')
+    Btn_frases = Crear_boton(Frm_botones_menu, '✎  EDITAR FRASES', Ir_a_frases, bg_color=COLOR_ACENTO2)
+    Btn_top10 = Crear_boton(Frm_botones_menu, '🏆  TOP 10', Ir_a_top10, bg_color=COLOR_AMARILLO, fg_color=BG)
+    
+    Btn_jugar.pack(pady=10)
+    Btn_frases.pack(pady=10)
+    Btn_top10.pack(pady=10)
+
+Crear_pantalla_menu()
+
+
+# ─── Pantalla de Selección de Modo ───────────────────────────────
+Contenedor_Pantalla_ModoJuego = Frame(VENTANA, bg=BG)
+
+def Crear_pantalla_modo():
+    for w in Contenedor_Pantalla_ModoJuego.winfo_children():
+        w.destroy()
+    Configurar_fondo(Contenedor_Pantalla_ModoJuego)
+    Frm_modo_scroll_frame, Contenedor_modo_scroll = Crear_contenedor_scrollable(Contenedor_Pantalla_ModoJuego)
+    Frm_modo_scroll_frame.pack(fill=BOTH, expand=True)
+
+    Lbl_titulo = Label(Contenedor_modo_scroll, text='SELECCIONA MODO', font=FONT_TITLE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_titulo.pack(pady=(40, 4))
+    Lbl_sep = Label(Contenedor_modo_scroll, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_sep.pack(pady=(4, 30))
+    
+    Frm_botones = Frame(Contenedor_modo_scroll, bg=BG)
+    Frm_botones.pack(pady=20)
+    
+    def Ir_a_config_escucha():
+        Crear_pantalla_config_escucha()
+        CambiarPantalla(Contenedor_Pantalla_Config)
+    
+    def Ir_a_config_transmision():
+        Crear_pantalla_config_transmision()
+        CambiarPantalla(Contenedor_Pantalla_Config)
+    
+    def Volver():
+        CambiarPantalla(Contenedor_Pantalla_Menu)
+    
+    Btn_escucha = Crear_boton(Frm_botones, '👂  ESCUCHA Y TRANSMISIÓN\n(2 Jugadores)', Ir_a_config_escucha, bg_color=COLOR_ACENTO, fg_color='white', wraplength=220, pady=18)
+    Btn_transmision = Crear_boton(Frm_botones, '📡  TRANSMISIÓN SIMPLE\n(1 Jugador)', Ir_a_config_transmision, bg_color=COLOR_ACENTO2, wraplength=220, pady=18)
+    
+    Btn_escucha.pack(pady=15)
+    Btn_transmision.pack(pady=15)
+    
+    Btn_volver = Crear_boton(Contenedor_modo_scroll, '← VOLVER', Volver, bg_color=COLOR_PANEL, fg_color=COLOR_TEXTO, ancho=18, font=FONT_MEDIANA)
+    Btn_volver.pack(pady=(20, 10))
+
+Crear_pantalla_modo()
+
+
+# ─── Pantalla de Gestión de Frases ───────────────────────────────
+Contenedor_Pantalla_Frases = Frame(VENTANA, bg=BG)
+
+def Crear_pantalla_frases():
+    for w in Contenedor_Pantalla_Frases.winfo_children():
+        w.destroy()
+    Configurar_fondo(Contenedor_Pantalla_Frases)
+    
+    Lbl_titulo = Label(Contenedor_Pantalla_Frases, text='EDITAR FRASES', font=FONT_TITLE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_titulo.pack(pady=(16, 4))
+    Lbl_info = Label(Contenedor_Pantalla_Frases, text='Máximo 16 caracteres por frase', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_info.pack(pady=(0, 4))
+    Lbl_sep = Label(Contenedor_Pantalla_Frases, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_sep.pack(pady=4)
+    
+    Frm_canvas = Frame(Contenedor_Pantalla_Frases, bg=BG)
+    Frm_canvas.pack(fill=BOTH, expand=True, padx=10, pady=10)
+    
+    Canvas_scroll = Canvas(Frm_canvas, bg=COLOR_PANEL, highlightthickness=0, height=250)
+    Scrollbar_y = Scrollbar(Frm_canvas, orient=VERTICAL, command=Canvas_scroll.yview)
+    Frm_scrollable = Frame(Canvas_scroll, bg=COLOR_PANEL)
+    
+    Frm_scrollable.bind("<Configure>", lambda e: Canvas_scroll.configure(scrollregion=Canvas_scroll.bbox("all")))
+    Canvas_scroll.create_window((0, 0), window=Frm_scrollable, anchor="nw")
+    Canvas_scroll.configure(yscrollcommand=Scrollbar_y.set)
+    
+    frases_cargadas = Cargar_frases()
+    entradas_frases = []
+    
+    for i in range(10):
+        Frm_fila = Frame(Frm_scrollable, bg=COLOR_PANEL)
+        Frm_fila.pack(fill=X, padx=8, pady=4)
+        
+        Lbl_num = Label(Frm_fila, text=f'{i+1}.', width=3, font=FONT_MEDIANA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+        Lbl_num.pack(side=LEFT, padx=4)
+        
+        valor_frase = frases_cargadas[i] if i < len(frases_cargadas) else ""
+        Ent_frase = Entry(Frm_fila, width=30, bg=BG, fg=COLOR_TEXTO, insertbackground=COLOR_TEXTO,
+                         font=FONT_MEDIANA, relief=FLAT, bd=2)
+        Ent_frase.insert(0, valor_frase)
+        Ent_frase.pack(side=LEFT, fill=X, expand=True, padx=4)
+        entradas_frases.append(Ent_frase)
+    
+    Canvas_scroll.pack(side=LEFT, fill=BOTH, expand=True)
+    Scrollbar_y.pack(side=RIGHT, fill=Y)
+    
+    Lbl_sep2 = Label(Contenedor_Pantalla_Frases, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_sep2.pack(pady=4)
+    
+    def Guardar_y_volver():
+        nuevas_frases = []
+        for ent in entradas_frases:
+            texto = ent.get().strip().upper()
+            if len(texto) > 16:
+                texto = texto[:16]
+            if texto:
+                nuevas_frases.append(texto)
+        
+        if len(nuevas_frases) < 3:
+            messagebox.showerror("Error", "Debes ingresar al menos 3 frases")
+            return
+        
+        while len(nuevas_frases) < 10:
+            nuevas_frases.append(f"FRASE{len(nuevas_frases)+1}")
+        
+        Guardar_frases(nuevas_frases)
+        global PALABRAS
+        PALABRAS = nuevas_frases
+        messagebox.showinfo("Éxito", "Frases guardadas correctamente")
+        CambiarPantalla(Contenedor_Pantalla_Menu)
+    
+    def Volver_sin_guardar():
+        CambiarPantalla(Contenedor_Pantalla_Menu)
+    
+    Frm_botones = Frame(Contenedor_Pantalla_Frases, bg=BG)
+    Frm_botones.pack(pady=(0, 16))
+    
+    Btn_guardar = Crear_boton(Frm_botones, '✓  GUARDAR', Guardar_y_volver, bg_color=COLOR_VERDE, fg_color=BG, ancho=16, font=FONT_MEDIANA)
+    Btn_volver = Crear_boton(Frm_botones, '←  VOLVER', Volver_sin_guardar, bg_color=COLOR_ACENTO2, ancho=16, font=FONT_MEDIANA)
+    Btn_guardar.pack(side=LEFT, padx=8)
+    Btn_volver.pack(side=LEFT, padx=8)
+
+Crear_pantalla_frases()
+
+
+# ─── Pantalla Top 10 ───────────────────────────────────────────────
+Contenedor_Pantalla_Top10 = Frame(VENTANA, bg=BG)
+
+def Crear_pantalla_top10():
+    for w in Contenedor_Pantalla_Top10.winfo_children():
+        w.destroy()
+    Configurar_fondo(Contenedor_Pantalla_Top10)
+    
+    Lbl_titulo = Label(Contenedor_Pantalla_Top10, text='TOP 10 PUNTAJES', font=FONT_TITLE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_titulo.pack(pady=(16, 4))
+    Lbl_sep = Label(Contenedor_Pantalla_Top10, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_sep.pack(pady=4)
+    
+    Frm_canvas = Frame(Contenedor_Pantalla_Top10, bg=BG)
+    Frm_canvas.pack(fill=BOTH, expand=True, padx=10, pady=10)
+    
+    Canvas_scroll = Canvas(Frm_canvas, bg=COLOR_PANEL, highlightthickness=0)
+    Scrollbar_y = Scrollbar(Frm_canvas, orient=VERTICAL, command=Canvas_scroll.yview)
+    Frm_scrollable = Frame(Canvas_scroll, bg=COLOR_PANEL)
+    
+    Frm_scrollable.bind("<Configure>", lambda e: Canvas_scroll.configure(scrollregion=Canvas_scroll.bbox("all")))
+    Canvas_scroll.create_window((0, 0), window=Frm_scrollable, anchor="nw")
+    Canvas_scroll.configure(yscrollcommand=Scrollbar_y.set)
+    
+    top10 = Obtener_top10()
+    
+    if not top10:
+        Lbl_vacio = Label(Frm_scrollable, text='No hay puntajes registrados', font=FONT_MEDIANA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+        Lbl_vacio.pack(pady=20)
+    else:
+        for idx, record in enumerate(top10, 1):
+            Frm_fila = Frame(Frm_scrollable, bg=COLOR_PANEL)
+            Frm_fila.pack(fill=X, padx=8, pady=4)
+            
+            color = COLOR_VERDE if idx == 1 else COLOR_AMARILLO if idx == 2 else COLOR_TEXTO
+            
+            Lbl_pos = Label(Frm_fila, text=f'{idx}.', width=3, font=FONT_MEDIANA, fg=color, bg=COLOR_PANEL)
+            Lbl_pos.pack(side=LEFT, padx=4)
+            
+            Lbl_nombre = Label(Frm_fila, text=record.get('nombre', '?'), width=15, font=FONT_MEDIANA, fg=color, bg=COLOR_PANEL)
+            Lbl_nombre.pack(side=LEFT, padx=4)
+            
+            Lbl_pts = Label(Frm_fila, text=f"{record.get('puntos', 0)} pts", width=10, font=FONT_MEDIANA, fg=color, bg=COLOR_PANEL)
+            Lbl_pts.pack(side=LEFT, padx=4)
+            
+            Lbl_modo = Label(Frm_fila, text=record.get('modo', '?'), width=12, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+            Lbl_modo.pack(side=LEFT, padx=4)
+    
+    Canvas_scroll.pack(side=LEFT, fill=BOTH, expand=True)
+    Scrollbar_y.pack(side=RIGHT, fill=Y)
+    
+    Lbl_sep2 = Label(Contenedor_Pantalla_Top10, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_sep2.pack(pady=4)
+    
+    Btn_volver = Crear_boton(Contenedor_Pantalla_Top10, '← VOLVER', lambda: CambiarPantalla(Contenedor_Pantalla_Menu), bg_color=COLOR_ACENTO2, ancho=16, font=FONT_MEDIANA)
+    Btn_volver.pack(pady=(0, 16))
+
+Crear_pantalla_top10()
+
+
+# ─── Pantalla de Configuración (Modo Escucha) ──────────────────────
+Contenedor_Pantalla_Config = Frame(VENTANA, bg=BG)
+
+def Crear_pantalla_config_escucha():
+    for w in Contenedor_Pantalla_Config.winfo_children():
+        w.destroy()
+    Configurar_fondo(Contenedor_Pantalla_Config)
+    Frm_escucha_scroll_frame, Contenedor_escucha_scroll = Crear_contenedor_scrollable(Contenedor_Pantalla_Config)
+    Frm_escucha_scroll_frame.pack(fill=BOTH, expand=True)
+    
+    Lbl_titulo = Label(Contenedor_escucha_scroll, text='BATALLA MORSE', font=FONT_TITLE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_subtitulo = Label(Contenedor_escucha_scroll, text='Configuracion - Modo Escucha', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador1 = Label(Contenedor_escucha_scroll, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+
+    Lbl_titulo.pack(pady=(24, 4))
+    Lbl_subtitulo.pack()
+    Lbl_separador1.pack(pady=4)
+
+    Lbl_seccion_jugadores = Label(Contenedor_escucha_scroll, text='JUGADORES', font=FONT_GRANDE, fg=COLOR_TEXTO, bg=BG)
+    Lbl_seccion_jugadores.pack()
+
+    Frm_jugadores = Frame(Contenedor_escucha_scroll, bg=BG)
+    Lbl_jugador1 = Label(Frm_jugadores, text='Jugador 1:', fg=COLOR_ACENTO, bg=BG, font=FONT_MEDIANA)
+    Ent_jugador1 = Entry(Frm_jugadores, width=18, bg=COLOR_PANEL, fg=COLOR_TEXTO, insertbackground=COLOR_TEXTO, font=FONT_MEDIANA, relief=FLAT, bd=4)
+    Lbl_jugador2 = Label(Frm_jugadores, text='Jugador 2:', fg=COLOR_ACENTO, bg=BG, font=FONT_MEDIANA)
+    Ent_jugador2 = Entry(Frm_jugadores, width=18, bg=COLOR_PANEL, fg=COLOR_TEXTO, insertbackground=COLOR_TEXTO, font=FONT_MEDIANA, relief=FLAT, bd=4)
+
+    Frm_jugadores.pack(pady=8)
+    Lbl_jugador1.grid(row=0, column=0, sticky='e', padx=6, pady=8)
+    Ent_jugador1.grid(row=0, column=1, padx=6)
+    Lbl_jugador2.grid(row=1, column=0, sticky="e", padx=6, pady=8)
+    Ent_jugador2.grid(row=1, column=1, padx=6)
+
+    Lbl_separador2 = Label(Contenedor_escucha_scroll, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador2.pack(pady=4)
+
+    Lbl_text_pico = Label(Contenedor_escucha_scroll, text='CONEXION PICO W', font=FONT_GRANDE, fg=COLOR_TEXTO, bg=BG)
+    Lbl_text_pico.pack()
+
+    Frm_ip = Frame(Contenedor_escucha_scroll, bg=BG)
+    Frm_ip.pack(pady=6)
+    Lbl_ip = Label(Frm_ip, text="IP:", fg=COLOR_TEXTO, font=FONT_MEDIANA, bg=BG)
+    Lbl_ip.pack(side=LEFT)
+    Ent_ip = Entry(Frm_ip, width=16, bg=COLOR_PANEL, fg=COLOR_TEXTO, insertbackground=COLOR_TEXTO, relief=FLAT, bd=4, font=FONT_MEDIANA)
+    Ent_ip.pack(side=LEFT, padx=10)
+
+    Lbl_conexion = Label(Contenedor_escucha_scroll, text='Sin conectar', fg=COLOR_GRIS, bg=BG, font=FONT_PUEQUENA)
+    Lbl_conexion.pack()
+
+    def FUNC_Btn_conectar():
+        Conectar(Ent_ip, Lbl_conexion)
+
+    Btn_conectar = Crear_boton(Contenedor_escucha_scroll, 'Conectar', FUNC_Btn_conectar, bg_color=COLOR_ACENTO2, ancho=18)
+    Btn_conectar.pack(pady=4)
+
+    Lbl_separador3 = Label(Contenedor_escucha_scroll, text='=' * 50, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador3.pack(pady=4)
+    Lbl_seccion_velocidad = Label(Contenedor_escucha_scroll, text='VELOCIDAD DE UNIDAD', font=FONT_GRANDE, fg=COLOR_TEXTO, bg=BG)
+    Lbl_seccion_velocidad.pack()
+
+    Var_unidad = StringVar(value=unidad_actual)
+    unidad0 = Get_unidad()
+    Lbl_vel_info = Label(Contenedor_escucha_scroll, fg=COLOR_GRIS, bg=BG, font=FONT_PUEQUENA,
+                         text=f'1U={unidad0:.1f}s  -  raya>={unidad0*2:.1f}s  -  letra>{unidad0*3:.1f}s  -  palabra>{unidad0*7:.1f}s')
+    Frm_vel = Frame(Contenedor_escucha_scroll, bg=BG)
+
+    Rbt_a = Radiobutton(Frm_vel, text='A (0.2 s/unidad)', variable=Var_unidad, value='A',
+                        bg=BG, fg=COLOR_TEXTO, selectcolor=COLOR_PANEL, font=FONT_MEDIANA,
+                        command=lambda: Cambiar_unidad(Var_unidad, Lbl_vel_info))
+
+    Rbt_b = Radiobutton(Frm_vel, text='B (0.3 s/unidad)', variable=Var_unidad, value='B',
+                        bg=BG, fg=COLOR_TEXTO, selectcolor=COLOR_PANEL, font=FONT_MEDIANA,
+                        command=lambda: Cambiar_unidad(Var_unidad, Lbl_vel_info))
+
+    Frm_vel.pack(pady=6)
+    Rbt_a.pack(side=LEFT, padx=12)
+    Rbt_b.pack(side=LEFT, padx=12)
+    Lbl_vel_info.pack(pady=2)
+
+    Lbl_separador4 = Label(Contenedor_escucha_scroll, text='=' * 50, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador4.pack(pady=4)
+    Lbl_error = Label(Contenedor_escucha_scroll, text='', fg=COLOR_ACENTO, bg=BG, font=FONT_PUEQUENA)
+    Lbl_error.pack()
+
+    def FUNC_Btn_iniciar():
+        Iniciar_Juego_Escucha(Ent_jugador1, Ent_jugador2, Lbl_error)
+
+    def FUNC_Btn_atras():
+        CambiarPantalla(Contenedor_Pantalla_ModoJuego)
+
+    Btn_iniciar = Crear_boton(Contenedor_escucha_scroll, '▶  INICIAR JUEGO', FUNC_Btn_iniciar, bg_color=COLOR_ACENTO, ancho=20)
+    Btn_atras = Crear_boton(Contenedor_escucha_scroll, '← ATRÁS', FUNC_Btn_atras, bg_color=COLOR_PANEL, fg_color=COLOR_TEXTO, ancho=18, font=FONT_MEDIANA)
+    Btn_iniciar.pack(pady=(4, 8))
+    Btn_atras.pack(pady=4)
+
+
+def Crear_pantalla_config_transmision():
+    for w in Contenedor_Pantalla_Config.winfo_children():
+        w.destroy()
+    Configurar_fondo(Contenedor_Pantalla_Config)
+    Frm_trans_conf_scroll_frame, Contenedor_trans_conf_scroll = Crear_contenedor_scrollable(Contenedor_Pantalla_Config)
+    Frm_trans_conf_scroll_frame.pack(fill=BOTH, expand=True)
+    
+    Lbl_titulo = Label(Contenedor_trans_conf_scroll, text='BATALLA MORSE', font=FONT_TITLE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_subtitulo = Label(Contenedor_trans_conf_scroll, text='Configuracion - Modo Transmisión', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador1 = Label(Contenedor_trans_conf_scroll, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+
+    Lbl_titulo.pack(pady=(24, 4))
+    Lbl_subtitulo.pack()
+    Lbl_separador1.pack(pady=4)
+
+    Lbl_jugador = Label(Contenedor_trans_conf_scroll, text='JUGADOR', font=FONT_GRANDE, fg=COLOR_TEXTO, bg=BG)
+    Lbl_jugador.pack()
+
+    Frm_jugador = Frame(Contenedor_trans_conf_scroll, bg=BG)
+    Frm_jugador.pack(pady=12)
+    Lbl_nombre = Label(Frm_jugador, text='Nombre:', fg=COLOR_ACENTO, bg=BG, font=FONT_MEDIANA)
+    Ent_jugador = Entry(Frm_jugador, width=20, bg=COLOR_PANEL, fg=COLOR_TEXTO, insertbackground=COLOR_TEXTO, font=FONT_MEDIANA, relief=FLAT, bd=4)
+
+    Lbl_nombre.grid(row=0, column=0, sticky='e', padx=6, pady=8)
+    Ent_jugador.grid(row=0, column=1, padx=6)
+
+    Lbl_separador2 = Label(Contenedor_trans_conf_scroll, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador2.pack(pady=4)
+
+    Lbl_text_pico = Label(Contenedor_trans_conf_scroll, text='CONEXION PICO W', font=FONT_GRANDE, fg=COLOR_TEXTO, bg=BG)
+    Lbl_text_pico.pack()
+
+    Frm_ip = Frame(Contenedor_trans_conf_scroll, bg=BG)
+    Frm_ip.pack(pady=6)
+    Lbl_ip = Label(Frm_ip, text="IP:", fg=COLOR_TEXTO, font=FONT_MEDIANA, bg=BG)
+    Lbl_ip.pack(side=LEFT)
+    Ent_ip = Entry(Frm_ip, width=16, bg=COLOR_PANEL, fg=COLOR_TEXTO, insertbackground=COLOR_TEXTO, relief=FLAT, bd=4, font=FONT_MEDIANA)
+    Ent_ip.pack(side=LEFT, padx=10)
+
+    Lbl_conexion = Label(Contenedor_trans_conf_scroll, text='Sin conectar', fg=COLOR_GRIS, bg=BG, font=FONT_PUEQUENA)
+    Lbl_conexion.pack()
+
+    def FUNC_Btn_conectar():
+        Conectar(Ent_ip, Lbl_conexion)
+
+    Btn_conectar = Crear_boton(Contenedor_trans_conf_scroll, 'Conectar', FUNC_Btn_conectar, bg_color=COLOR_ACENTO2, ancho=18)
+    Btn_conectar.pack(pady=4)
+
+    Lbl_separador3 = Label(Contenedor_trans_conf_scroll, text='=' * 50, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador3.pack(pady=4)
+    Lbl_seccion_velocidad = Label(Contenedor_trans_conf_scroll, text='VELOCIDAD DE UNIDAD', font=FONT_GRANDE, fg=COLOR_TEXTO, bg=BG)
+    Lbl_seccion_velocidad.pack()
+
+    Var_unidad = StringVar(value=unidad_actual)
+    unidad0 = Get_unidad()
+    Lbl_vel_info = Label(Contenedor_trans_conf_scroll, fg=COLOR_GRIS, bg=BG, font=FONT_PUEQUENA,
+                         text=f'1U={unidad0:.1f}s  -  raya>={unidad0*2:.1f}s  -  letra>{unidad0*3:.1f}s  -  palabra>{unidad0*7:.1f}s')
+    Frm_vel = Frame(Contenedor_trans_conf_scroll, bg=BG)
+
+    Rbt_a = Radiobutton(Frm_vel, text='A (0.2 s/unidad)', variable=Var_unidad, value='A',
+                        bg=BG, fg=COLOR_TEXTO, selectcolor=COLOR_PANEL, font=FONT_MEDIANA,
+                        command=lambda: Cambiar_unidad(Var_unidad, Lbl_vel_info))
+
+    Rbt_b = Radiobutton(Frm_vel, text='B (0.3 s/unidad)', variable=Var_unidad, value='B',
+                        bg=BG, fg=COLOR_TEXTO, selectcolor=COLOR_PANEL, font=FONT_MEDIANA,
+                        command=lambda: Cambiar_unidad(Var_unidad, Lbl_vel_info))
+
+    Frm_vel.pack(pady=6)
+    Rbt_a.pack(side=LEFT, padx=12)
+    Rbt_b.pack(side=LEFT, padx=12)
+    Lbl_vel_info.pack(pady=2)
+
+    Lbl_separador4 = Label(Contenedor_trans_conf_scroll, text='=' * 50, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador4.pack(pady=4)
+    Lbl_error = Label(Contenedor_trans_conf_scroll, text='', fg=COLOR_ACENTO, bg=BG, font=FONT_PUEQUENA)
+    Lbl_error.pack()
+
+    def FUNC_Btn_iniciar():
+        Iniciar_Juego_Transmision(Ent_jugador, Lbl_error)
+
+    def FUNC_Btn_atras():
+        CambiarPantalla(Contenedor_Pantalla_ModoJuego)
+
+    Btn_iniciar = Crear_boton(Contenedor_trans_conf_scroll, '▶  INICIAR JUEGO', FUNC_Btn_iniciar, bg_color=COLOR_ACENTO, fg_color='white', ancho=20)
+    Btn_atras = Crear_boton(Contenedor_trans_conf_scroll, '← ATRÁS', FUNC_Btn_atras, bg_color=COLOR_PANEL, fg_color=COLOR_TEXTO, ancho=18, font=FONT_MEDIANA)
+    Btn_iniciar.pack(pady=(4, 8))
+    Btn_atras.pack(pady=4)
+
+
+#---------- PANTALLA JUEGO (MODO ESCUCHA) --------
+def Actualizar_display_teclado():
+    global respuesta_teclado
+    secuencia = ''.join(tec_simbolos)
+
+    if secuencia:
+        texto_simbolos = secuencia
+        texto_char = Decodificar_simbolo(secuencia)
+    else:
+        texto_simbolos = "·"
+        texto_char = ""
+
+    Lbl_simbolos.config(text=texto_simbolos)
+    Lbl_char_actual.config(text=texto_char)
+
+    texto_actual = ''.join(tec_texto)
+    Lbl_teclado_texto.config(text=texto_actual)
+    respuesta_teclado = texto_actual
+
+def Confirmar_caracter():
+    global tec_timer_char
+
+    if tec_timer_char is not None:
+        VENTANA.after_cancel(tec_timer_char)
+        tec_timer_char = None
+
+    secuencia = ''.join(tec_simbolos)
+    if secuencia:
+        char = Decodificar_simbolo(secuencia)
+        tec_texto.append(char)
+        tec_simbolos.clear()
+        Lbl_estado_tec.config(text=f'{secuencia} → {char}', fg=COLOR_VERDE)
+    Actualizar_display_teclado()
+
+def Confirmar_palabra():
+    global tec_timer_palabra
+    tec_timer_palabra = None
+    Confirmar_caracter()
+
+    if tec_texto and tec_texto[-1] != ' ':
+        tec_texto.append(' ')
+
+    Actualizar_display_teclado()
+    Lbl_estado_tec.config(text='- espacio entre palabras -', fg=COLOR_GRIS)
+
+def Espacio_presionado(evento):
+    global tec_presionado, tec_t_inicio
+    global tec_timer_char, tec_timer_palabra
+    if tec_presionado:
+        return
+
+    if tec_timer_char is not None:
+        VENTANA.after_cancel(tec_timer_char)
+        tec_timer_char = None
+
+    if tec_timer_palabra is not None:
+        VENTANA.after_cancel(tec_timer_palabra)
+        tec_timer_palabra = None
+
+    tec_presionado = True
+    tec_t_inicio = time.time()
+    Lbl_estado_tec.config(text='● Presionando...', fg=COLOR_ACENTO)
+
+def Espacio_al_soltar(evento):
+    global tec_presionado, tec_timer_char, tec_timer_palabra
+
+    if not tec_presionado:
+        return
+
+    duracion = time.time() - tec_t_inicio
+    tec_presionado = False
+    unidad = Get_unidad()
+
+    if duracion < unidad * 2:
+        simbolo = '.'
+    else:
+        simbolo = '-'
+
+    tec_simbolos.append(simbolo)
+    Actualizar_display_teclado()
+
+    if simbolo == '.':
+        Lbl_estado_tec.config(text=f'Punto ({duracion:.2f}s)', fg=COLOR_GRIS)
+    else:
+        Lbl_estado_tec.config(text=f'Raya ({duracion:.2f}s)', fg=COLOR_GRIS)
+
+    tec_timer_char = VENTANA.after(int(unidad * 3 * 1000), Confirmar_caracter)
+    tec_timer_palabra = VENTANA.after(int(unidad * 7 * 1000), Confirmar_palabra)
+
+def Actualizar_label_boton():
+    Lbl_boton_texto.config(text=respuesta_boton)
+
+def Cambiar_color_nombre():
+    Lbl_morse_raw.config(fg=COLOR_ACENTO)
+
+def Loop_polling():
+    global respuesta_boton
+    while True:
+        time.sleep(INTERVALO)
+        if PICO_IP is None:
+            continue
+        morse = Enviar_comando('GET_MORSE')
+        if morse:
+            respuesta_boton += Decodificar_cadena(morse)
+            Lbl_morse_raw.after(0, Cambiar_color_nombre)
+            Lbl_boton_texto.after(0, Actualizar_label_boton)
+
+def Reiniciar_pantalla_juego():
+    global respuesta_boton, respuesta_teclado, palabra_actual
+    global tec_presionado, tec_t_inicio, tec_timer_char, tec_timer_palabra, turno_actual
+
+    respuesta_boton   = ''
+    respuesta_teclado = ''
+    palabra_actual    = random.choice(PALABRAS)
+    tec_presionado    = False
+    tec_t_inicio      = 0.0
+    tec_simbolos.clear()
+    tec_texto.clear()
+    tec_timer_char    = None
+    tec_timer_palabra = None
+    turno_actual      = 1
+
+    Lbl_nombre1.config(text=nombre_j1)
+    Lbl_nombre2.config(text=nombre_j2)
+    Lbl_obj_palabra.config(text=palabra_actual)
+    Lbl_morse_raw.config(text='Esperando...', fg=COLOR_GRIS)
+    Lbl_boton_texto.config(text='')
+    Lbl_simbolos.config(text='·')
+    Lbl_char_actual.config(text='')
+    Lbl_teclado_texto.config(text='')
+    Lbl_estado_tec.config(text='Presiona espacio', fg=COLOR_GRIS)
+    Lbl_turno.config(text=f'Turno: Jugador 1 (BOTON) vs Jugador 2 (TECLADO)')
+
+    VENTANA.bind("<KeyPress-space>", Espacio_presionado)
+    VENTANA.bind("<KeyRelease-space>", Espacio_al_soltar)
+
+Contenedor_Pantalla_Juego = Frame(VENTANA, bg=BG)
+Configurar_fondo(Contenedor_Pantalla_Juego)
+Frm_juego_scroll_frame, Contenedor_juego_scroll = Crear_contenedor_scrollable(Contenedor_Pantalla_Juego)
+Frm_juego_scroll_frame.pack(fill=BOTH, expand=True)
+respuesta_boton   = ''
+respuesta_teclado = ''
+palabra_actual    = random.choice(PALABRAS)
+
+tec_presionado = False
+tec_t_inicio   = 0.0
+tec_simbolos   = []
+tec_texto      = []
+tec_timer_char    = None
+tec_timer_palabra = None
+
+# Header
+Frm_header = Frame(Contenedor_juego_scroll, bg=COLOR_PANEL)
+Frm_header.pack(fill=X)
+Lbl_titulo = Label(Frm_header, text='BATALLA MORSE - MODO ESCUCHA', font=FONT_TITLE, fg=COLOR_ACENTO, bg=COLOR_PANEL)
+Lbl_titulo.pack(pady=10)
+
+# Palabra objetivo
+Lbl_obj_subtitulo = Label(Contenedor_juego_scroll, text='PALABRA OBJETIVO', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+Lbl_obj_subtitulo.pack(pady=(16, 2))
+Lbl_obj_palabra = Label(Contenedor_juego_scroll, text=palabra_actual, font=(FUENTE, 36, "bold"), fg=COLOR_ACENTO, bg=BG)
+Lbl_obj_palabra.pack()
+
+Lbl_turno = Label(Contenedor_juego_scroll, text='Turno: Jugador 1 (BOTON) vs Jugador 2 (TECLADO)', font=FONT_PUEQUENA, fg=COLOR_AMARILLO, bg=BG)
+Lbl_turno.pack()
+
+Lbl_separador5 = Label(Contenedor_juego_scroll, text="=" * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+Lbl_separador5.pack(pady=4)
+
+# Area jugadores
+Frm_arena = Frame(Contenedor_Pantalla_Juego, bg=BG)
+Frm_arena.pack(fill=BOTH, expand=True, padx=10)
+
+Frm_col1 = Frame(Frm_arena, bg=COLOR_PANEL)
+Frm_col2 = Frame(Frm_arena, bg=COLOR_PANEL)
+Frm_col1.grid(row=0, column=0, padx=8, pady=4, sticky="nsew")
+Frm_col2.grid(row=0, column=1, padx=8, pady=4, sticky="nsew")
+Frm_arena.columnconfigure(0, weight=1)
+Frm_arena.columnconfigure(1, weight=1)
+
+# Jugador 1 - recibe datos desde la Pico via HTTP polling
+Lbl_nombre1 = Label(Frm_col1, text=nombre_j1, font=FONT_GRANDE, fg=COLOR_ACENTO, bg=COLOR_PANEL)
+Lbl_nombre1.pack(pady=(12, 2))
+Lbl_tipo1 = Label(Frm_col1, text='[BOTON FISICO]', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+Lbl_tipo1.pack()
+Lbl_morse_raw = Label(Frm_col1, text='Esperando...', font=(FUENTE, 11), fg=COLOR_GRIS, bg=COLOR_PANEL)
+Lbl_morse_raw.pack(pady=(8, 2))
+Lbl_recivido = Label(Frm_col1, text='Texto Recibido:', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+Lbl_recivido.pack()
+Lbl_boton_texto = Label(Frm_col1, text='', font=(FUENTE, 20, "bold"), fg=COLOR_TEXTO, bg=COLOR_PANEL, wraplength=180)
+Lbl_boton_texto.pack(pady=(2, 12))
+
+# Jugador 2 - usa la barra espaciadora como boton morse
+Lbl_nombre2 = Label(Frm_col2, text=nombre_j2, font=FONT_GRANDE, fg=COLOR_AMARILLO, bg=COLOR_PANEL)
+Lbl_nombre2.pack(pady=(12, 2))
+Lbl_tipo2 = Label(Frm_col2, text='[BARRA ESPACIADORA]', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+Lbl_tipo2.pack()
+Lbl_sim_sub = Label(Frm_col2, text='Simbolo actual:', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+Lbl_sim_sub.pack(pady=(8, 0))
+Lbl_simbolos = Label(Frm_col2, text='.', font=(FUENTE, 14), fg=COLOR_ACENTO2, bg=COLOR_PANEL)
+Lbl_simbolos.pack()
+Lbl_char_sub = Label(Frm_col2, text='Caracter', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+Lbl_char_sub.pack()
+Lbl_char_actual = Label(Frm_col2, text='', font=(FUENTE, 22, "bold"), fg=COLOR_AMARILLO, bg=COLOR_PANEL)
+Lbl_acum_sub = Label(Frm_col2, text='Texto acumulado:', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+Lbl_acum_sub.pack()
+Lbl_teclado_texto = Label(Frm_col2, text='', font=(FUENTE, 20, "bold"), fg=COLOR_TEXTO, bg=COLOR_PANEL, wraplength=180)
+Lbl_teclado_texto.pack(pady=(2, 2))
+Lbl_estado_tec = Label(Frm_col2, text='Presiona espacio', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=COLOR_PANEL)
+Lbl_estado_tec.pack(pady=(0, 12))
+
+# Botones inferiores
+Lbl_separador6 = Label(Contenedor_juego_scroll, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+Lbl_separador6.pack(pady=4)
+
+Frm_botones_juego = Frame(Contenedor_juego_scroll, bg=BG)
+Frm_botones_juego.pack(pady=(4, 20))
+
+def FUNC_Btn_resultado():
+    Confirmar_caracter()
+    Poblar_pantalla_puntajes()
+    CambiarPantalla(Contenedor_Pantalla_Puntaje)
+    VENTANA.unbind("<KeyPress-space>")
+    VENTANA.unbind("<KeyRelease-space>")
+
+def FUNC_Btn_referencia():
+    Abrir_referencia_morse()
+
+Btn_volver_juego = Crear_boton(Frm_botones_juego, '← MENÚ', lambda: CambiarPantalla(Contenedor_Pantalla_Menu), bg_color=COLOR_PANEL, fg_color=COLOR_TEXTO, ancho=14, padx=10, pady=6, font=FONT_PUEQUENA)
+Btn_volver_juego.pack(side=LEFT, padx=8)
+
+Btn_resultado = Crear_boton(Frm_botones_juego, 'CALCULAR RESULTADO', FUNC_Btn_resultado, bg_color=COLOR_VERDE, fg_color='#0f0f1a')
+Btn_resultado.pack(side=LEFT, padx=8)
+
+Btn_referencia = Crear_boton(Frm_botones_juego, 'REFERENCIA', FUNC_Btn_referencia, bg_color=COLOR_ACENTO2)
+Btn_referencia.pack(side=LEFT, padx=8)
+
+VENTANA.bind("<KeyPress-space>", Espacio_presionado)
+VENTANA.bind("<KeyRelease-space>", Espacio_al_soltar)
+
+hilo = threading.Thread(target=Loop_polling, daemon=True)
+hilo.start()
+
+
+# ─── Ventana flotante: tabla de referencia morse ──────────────
+def Abrir_referencia_morse():
+    if hasattr(Abrir_referencia_morse, 'ventana') and Abrir_referencia_morse.ventana.winfo_exists():
+        Abrir_referencia_morse.ventana.lift()
+        return
+
+    ref = Toplevel(VENTANA)
+    ref.title('Referencia Morse')
+    ref.configure(bg=BG)
+    ref.resizable(False, False)
+    Abrir_referencia_morse.ventana = ref
+
+    Lbl_ref_titulo = Label(ref, text='CODIGO MORSE', font=FONT_GRANDE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_ref_titulo.pack(pady=(16, 4))
+    Lbl_ref_sep = Label(ref, text='=' * 44, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_ref_sep.pack(pady=2)
+
+    Frm_ref_scroll_frame, Contenedor_ref_scroll = Crear_contenedor_scrollable(ref)
+    Frm_ref_scroll_frame.pack(fill=BOTH, expand=True, padx=10, pady=8)
+
+    Frm_ref_cuerpo = Frame(Contenedor_ref_scroll, bg=BG)
+    Frm_ref_cuerpo.pack(padx=20, pady=8)
+
+    Frm_letras = Frame(Frm_ref_cuerpo, bg=BG)
+    Frm_nums = Frame(Frm_ref_cuerpo, bg=BG)
+    Frm_letras.grid(row=0, column=0, padx=16, sticky='n')
+    Frm_nums.grid(row=0, column=1, padx=16, sticky='n')
+
+    Label(Frm_letras, text='LETRA', width=6, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG).grid(row=0, column=0)
+    Label(Frm_letras, text='MORSE', width=10, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG).grid(row=0, column=1)
+    Label(Frm_nums, text='CHAR', width=6, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG).grid(row=0, column=0)
+    Label(Frm_nums, text='MORSE', width=10, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG).grid(row=0, column=1)
+
+    fila_letras = 1
+    fila_nums = 1
+    for simbolo, char in MORSE_A_TEXTO.items():
+        if char.isalpha() and fila_letras < 20:
+            Label(Frm_letras, text=char, width=6, font=FONT_MEDIANA, fg=COLOR_TEXTO, bg=BG).grid(row=fila_letras, column=0, pady=1)
+            Label(Frm_letras, text=simbolo, width=10, font=FONT_MEDIANA, fg=COLOR_AMARILLO, bg=BG).grid(row=fila_letras, column=1, pady=1)
+            fila_letras += 1
+        else:
+            Label(Frm_nums, text=char, width=6, font=FONT_MEDIANA, fg=COLOR_TEXTO, bg=BG).grid(row=fila_nums, column=0, pady=1)
+            Label(Frm_nums, text=simbolo, width=10, font=FONT_MEDIANA, fg=COLOR_AMARILLO, bg=BG).grid(row=fila_nums, column=1, pady=1)
+            fila_nums += 1
+
+    Lbl_ref_sep2 = Label(ref, text='=' * 44, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_ref_sep2.pack(pady=(4, 16))
+
+    Btn_cerrar_ref = Crear_boton(ref, 'CERRAR', ref.destroy, bg_color=COLOR_PANEL, fg_color=COLOR_TEXTO)
+    Btn_cerrar_ref.pack(pady=(0, 16))
+
+
+# =========== PANTALLA RESULTADOS ===========
+def Calcular_puntos(objetivo, respuesta):
+    puntos = 0
+    for i, char in enumerate(objetivo):
+        if i < len(respuesta) and respuesta[i] == char:
+            puntos += 1
+    return puntos
+
+def Mostrar_comparacion(padre, etiqueta, texto, objetivo, color_label):
+    Frm_fila = Frame(padre, bg=BG)
+    Lbl_etiqueta = Label(Frm_fila, text=f'{etiqueta:<14}', font=(FUENTE, 11), fg=color_label, bg=BG)
+    Frm_fila.pack(anchor='w', pady=1)
+    Lbl_etiqueta.pack(side=LEFT)
+
+    if not texto:
+        Lbl_vacio = Label(Frm_fila, text='(vacio)', font=(FUENTE, 11), fg=COLOR_GRIS, bg=BG)
+        Lbl_vacio.pack(side=LEFT)
+        return
+
+    for i, char in enumerate(texto):
+        if char == " ":
+            Label(Frm_fila, text=" ", font=(FUENTE, 14, "bold"), bg=BG).pack(side=LEFT)
+            continue
+        if i < len(objetivo) and objetivo[i] == char:
+            color = COLOR_VERDE
+        else:
+            color = COLOR_ACENTO
+        Label(Frm_fila, text=char, font=(FUENTE, 14, "bold"), fg=color, bg=BG).pack(side=LEFT)
+
+def Poblar_pantalla_puntajes():
+    for w in Contenedor_Pantalla_Puntaje.winfo_children():
+        w.destroy()
+
+    objetivo = palabra_actual.replace(' ', '')
+    r_boton = respuesta_boton.replace(' ', '').upper()
+    r_teclado = respuesta_teclado.replace(' ', '').upper()
+
+    puntos1 = Calcular_puntos(objetivo, r_boton)
+    puntos2 = Calcular_puntos(objetivo, r_teclado)
+
+    # Guardar puntajes
+    Agregar_puntaje(nombre_j1, puntos1, MODO_JUEGO, ronda_actual)
+    Agregar_puntaje(nombre_j2, puntos2, MODO_JUEGO, ronda_actual)
+
+    Lbl_titulo_respuesta = Label(Contenedor_Pantalla_Puntaje, text='RESULTADO', font=FONT_TITLE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_titulo_respuesta.pack(pady=(24, 4))
+    Lbl_objetivo = Label(Contenedor_Pantalla_Puntaje, text=f'Palabra objetivo:  {palabra_actual}', font=FONT_GRANDE, fg=COLOR_TEXTO, bg=BG)
+    Lbl_objetivo.pack(pady=4)
+    Lbl_separador7 = Label(Contenedor_Pantalla_Puntaje, text='=' * 55, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador7.pack(pady=4)
+
+    Frm_tabla = Frame(Contenedor_Pantalla_Puntaje, bg=BG)
+    Frm_tabla.pack(pady=8)
+
+    Lbl_tabla_vacio = Label(Frm_tabla, text='', width=4, font=FONT_MEDIANA, fg=COLOR_GRIS, bg=BG)
+    Lbl_tabla_jug = Label(Frm_tabla, text='Jugador', width=18, font=FONT_MEDIANA, fg=COLOR_GRIS, bg=BG)
+    Lbl_tabla_resp = Label(Frm_tabla, text='Respuesta', width=20, font=FONT_MEDIANA, fg=COLOR_GRIS, bg=BG)
+    Lbl_tabla_pts = Label(Frm_tabla, text='Puntos', width=8, font=FONT_MEDIANA, fg=COLOR_GRIS, bg=BG)
+    Lbl_tabla_vacio.grid(row=0, column=0, padx=4, pady=2)
+    Lbl_tabla_jug.grid(row=0, column=1, padx=4, pady=2)
+    Lbl_tabla_resp.grid(row=0, column=2, padx=4, pady=2)
+    Lbl_tabla_pts.grid(row=0, column=3, padx=4, pady=2)
+
+    if puntos1 > puntos2:
+        color_pts1, color_pts2 = COLOR_VERDE, COLOR_TEXTO
+    elif puntos1 < puntos2:
+        color_pts1, color_pts2 = COLOR_TEXTO, COLOR_VERDE
+    else:
+        color_pts1, color_pts2 = COLOR_VERDE, COLOR_VERDE
+
+    Lbl_icono1 = Label(Frm_tabla, text='J1', width=4, font=FONT_GRANDE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_nombre1_res = Label(Frm_tabla, text=nombre_j1, width=18, font=FONT_MEDIANA, fg=COLOR_ACENTO, bg=BG, anchor='n')
+    Lbl_respuesta1 = Label(Frm_tabla, text=r_boton or '—', width=20, font=(FUENTE, 12), fg=COLOR_TEXTO, bg=BG, anchor='n')
+    Lbl_pts1 = Label(Frm_tabla, text=str(puntos1), width=8, font=FONT_GRANDE, fg=color_pts1, bg=BG)
+    Lbl_icono1.grid(row=1, column=0, padx=4)
+    Lbl_nombre1_res.grid(row=1, column=1, padx=4)
+    Lbl_respuesta1.grid(row=1, column=2, padx=4)
+    Lbl_pts1.grid(row=1, column=3, padx=4)
+
+    Lbl_icono2 = Label(Frm_tabla, text='J2', width=4, font=FONT_GRANDE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_nombre2_res = Label(Frm_tabla, text=nombre_j2, width=18, font=FONT_MEDIANA, fg=COLOR_ACENTO, bg=BG, anchor='n')
+    Lbl_respuesta2 = Label(Frm_tabla, text=r_teclado or '—', width=20, font=(FUENTE, 12), fg=COLOR_TEXTO, bg=BG, anchor='n')
+    Lbl_pts2 = Label(Frm_tabla, text=str(puntos2), width=8, font=FONT_GRANDE, fg=color_pts2, bg=BG)
+    Lbl_icono2.grid(row=2, column=0, padx=4)
+    Lbl_nombre2_res.grid(row=2, column=1, padx=4)
+    Lbl_respuesta2.grid(row=2, column=2, padx=4)
+    Lbl_pts2.grid(row=2, column=3, padx=4)
+
+    Lbl_separador8 = Label(Contenedor_Pantalla_Puntaje, text='=' * 55, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador8.pack(pady=4)
+
+    Lbl_comparacion_title = Label(Contenedor_Pantalla_Puntaje, text='Comparacion caracter a caracter', font=FONT_MEDIANA, fg=COLOR_GRIS, bg=BG)
+    Lbl_comparacion_title.pack(pady=(4, 2))
+
+    Frm_comparacion = Frame(Contenedor_Pantalla_Puntaje, bg=BG)
+    Frm_comparacion.pack(pady=4)
+    Mostrar_comparacion(Frm_comparacion, 'Objetivo', objetivo, objetivo, COLOR_GRIS)
+    Mostrar_comparacion(Frm_comparacion, nombre_j1, r_boton, objetivo, COLOR_ACENTO)
+    Mostrar_comparacion(Frm_comparacion, nombre_j2, r_teclado, objetivo, COLOR_AMARILLO)
+
+    Lbl_separador9 = Label(Contenedor_Pantalla_Puntaje, text='=' * 55, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador9.pack(pady=4)
+
+    if puntos1 > puntos2:
+        ganador, color_g = nombre_j1, COLOR_ACENTO
+    elif puntos2 > puntos1:
+        ganador, color_g = nombre_j2, COLOR_AMARILLO
+    else:
+        ganador, color_g = 'EMPATE', COLOR_VERDE
+
+    Lbl_ganador_text = Label(Contenedor_Pantalla_Puntaje, text='GANADOR', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_ganador_text.pack()
+    Lbl_ganador = Label(Contenedor_Pantalla_Puntaje, text=f'🏆  {ganador}', font=(FUENTE, 28, "bold"), fg=color_g, bg=BG)
+    Lbl_ganador.pack(pady=4)
+
+    Lbl_separador10 = Label(Contenedor_Pantalla_Puntaje, text='=' * 55, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_separador10.pack(pady=4)
+
+    Frm_botones = Frame(Contenedor_Pantalla_Puntaje, bg=BG)
+    Frm_botones.pack(pady=(4, 24))
+
+    def FUNC_Btn_otra_ronda():
+        global ronda_actual
+        ronda_actual += 1
+        Reiniciar_pantalla_juego()
+        CambiarPantalla(Contenedor_Pantalla_Juego)
+
+    def FUNC_Btn_nueva_config():
+        CambiarPantalla(Contenedor_Pantalla_Menu)
+
+    Btn_otra = Crear_boton(Frm_botones, 'OTRA RONDA', FUNC_Btn_otra_ronda, bg_color=COLOR_ACENTO2, ancho=16, font=FONT_MEDIANA)
+    Btn_config = Crear_boton(Frm_botones, 'MENU PRINCIPAL', FUNC_Btn_nueva_config, bg_color=COLOR_PANEL, fg_color=COLOR_TEXTO, ancho=16, font=FONT_MEDIANA)
+    Btn_otra.pack(side=LEFT, padx=8)
+    Btn_config.pack(side=LEFT, padx=8)
+
+Contenedor_Pantalla_Puntaje = Frame(VENTANA, bg=BG)
+Configurar_fondo(Contenedor_Pantalla_Puntaje)
+
+
+# ═══════ PANTALLA TRANSMISIÓN SIMPLE ═════════════════════════════
+def Reiniciar_pantalla_transmision():
+    global respuesta_teclado_trans, velocidad_actual, frase_actual_trans, ronda_trans, juego_transmision_activo, puntajes_transmision
+
+    respuesta_teclado_trans = ''
+    velocidad_actual = 1
+    frase_actual_trans = random.choice(PALABRAS)
+    ronda_trans = 1
+    juego_transmision_activo = False
+    puntajes_transmision = [0, 0, 0]  # Resetear puntajes
+
+    Lbl_titulo_trans.config(text=f'RONDA {ronda_trans}/3 - Velocidad: {velocidad_actual}x')
+    Lbl_frase_trans.config(text=frase_actual_trans)
+    Lbl_texto_trans.config(text='')
+    Lbl_estado_trans.config(text='Presiona ESPACIO para comenzar la transmisión')
+
+    # Limpiar variables de entrada
+    tec_simbolos_trans.clear()
+    tec_texto_trans.clear()
+    tec_presionado_trans = False
+    tec_t_inicio_trans = 0.0
+    if tec_timer_char_trans is not None:
+        VENTANA.after_cancel(tec_timer_char_trans)
+        tec_timer_char_trans = None
+    if tec_timer_palabra_trans is not None:
+        VENTANA.after_cancel(tec_timer_palabra_trans)
+        tec_timer_palabra_trans = None
+
+    VENTANA.bind("<KeyPress-space>", Iniciar_transmision_ronda)
+    VENTANA.unbind("<KeyRelease-space>")  # Desvincular hasta que empiece la ronda
+
+Contenedor_Pantalla_Transmision = Frame(VENTANA, bg=BG)
+Configurar_fondo(Contenedor_Pantalla_Transmision)
+Frm_trans_scroll_frame, Contenedor_trans_scroll = Crear_contenedor_scrollable(Contenedor_Pantalla_Transmision)
+Frm_trans_scroll_frame.pack(fill=BOTH, expand=True)
+
+respuesta_teclado_trans = ''
+velocidad_actual = 1
+frase_actual_trans = ''
+ronda_trans = 1
+juego_transmision_activo = False
+puntajes_transmision = [0, 0, 0]  # Puntajes de las 3 rondas
+tec_presionado_trans = False
+tec_t_inicio_trans = 0.0
+tec_simbolos_trans = []
+tec_texto_trans = []
+tec_timer_char_trans = None
+tec_timer_palabra_trans = None
+
+# ═══════ FUNCIONES MODO TRANSMISIÓN SIMPLE ════════════════════════
+
+def Iniciar_transmision_ronda(evento):
+    """Inicia la transmisión de la frase actual por parte de la Pico W"""
+    global juego_transmision_activo
+
+    if juego_transmision_activo:
+        return
+
+    juego_transmision_activo = True
+    Lbl_estado_trans.config(text='Transmitiendo frase...', fg=COLOR_AMARILLO)
+
+    # Enviar comando para que la Pico transmita la frase actual a la velocidad actual
+    comando = f'TRANSMITIR/{frase_actual_trans}/{velocidad_actual}'
+    respuesta = Enviar_comando(comando)
+
+    if respuesta:
+        Lbl_estado_trans.config(text='Transmisión completada. Ahora ingresa tu respuesta con ESPACIO', fg=COLOR_VERDE)
+        # Configurar entrada del usuario
+        VENTANA.bind("<KeyPress-space>", Espacio_presionado_trans)
+        VENTANA.bind("<KeyRelease-space>", Espacio_al_soltar_trans)
+    else:
+        Lbl_estado_trans.config(text='Error en transmisión. Verifica conexión con Pico W', fg=COLOR_ACENTO)
+        juego_transmision_activo = False
+
+def Finalizar_ronda_transmision():
+    """Calcula puntaje de la ronda actual y pasa a la siguiente"""
+    global ronda_trans, velocidad_actual, juego_transmision_activo
+
+    # Calcular puntaje
+    objetivo = frase_actual_trans.replace(' ', '').upper()
+    respuesta = respuesta_teclado_trans.replace(' ', '').upper()
+    puntos = Calcular_puntos_transmision(objetivo, respuesta, velocidad_actual)
+    puntajes_transmision[ronda_trans - 1] = puntos
+
+    # Mostrar resultado de ronda
+    messagebox.showinfo("Resultado de Ronda",
+                       f"Ronda {ronda_trans}/3 completada\n"
+                       f"Frase: {frase_actual_trans}\n"
+                       f"Tu respuesta: {respuesta_teclado_trans}\n"
+                       f"Puntos: {puntos} (x{velocidad_actual})")
+
+    ronda_trans += 1
+    juego_transmision_activo = False
+
+    if ronda_trans <= 3:
+        # Preparar siguiente ronda
+        velocidad_actual = ronda_trans  # 1x, 2x, 3x
+        frase_actual_trans = random.choice(PALABRAS)
+
+        Lbl_titulo_trans.config(text=f'RONDA {ronda_trans}/3 - Velocidad: {velocidad_actual}x')
+        Lbl_frase_trans.config(text=frase_actual_trans)
+        Lbl_texto_trans.config(text='')
+        Lbl_estado_trans.config(text='Presiona ESPACIO para comenzar la siguiente ronda', fg=COLOR_GRIS)
+
+        # Limpiar entrada
+        tec_simbolos_trans.clear()
+        tec_texto_trans.clear()
+
+        VENTANA.bind("<KeyPress-space>", Iniciar_transmision_ronda)
+        VENTANA.unbind("<KeyRelease-space>")
+    else:
+        # Juego completado - mostrar resultados finales
+        Mostrar_resultados_transmision()
+
+def Mostrar_resultados_transmision():
+    """Muestra los resultados finales del modo transmisión"""
+    total_puntos = sum(puntajes_transmision)
+
+    # Guardar puntaje en Top 10
+    Agregar_puntaje(nombre_j1, total_puntos, "TRANSMISION", 3)
+
+    # Crear ventana de resultados
+    ventana_resultados = Toplevel(VENTANA)
+    ventana_resultados.title('Resultados - Modo Transmisión')
+    ventana_resultados.configure(bg=BG)
+    ventana_resultados.resizable(False, False)
+    ventana_resultados.geometry("500x400")
+
+    Lbl_titulo_res = Label(ventana_resultados, text='RESULTADOS FINALES', font=FONT_TITLE, fg=COLOR_ACENTO, bg=BG)
+    Lbl_titulo_res.pack(pady=(20, 4))
+
+    Lbl_jugador = Label(ventana_resultados, text=f'Jugador: {nombre_j1}', font=FONT_GRANDE, fg=COLOR_TEXTO, bg=BG)
+    Lbl_jugador.pack(pady=4)
+
+    Lbl_sep = Label(ventana_resultados, text='=' * 40, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_sep.pack(pady=4)
+
+    # Tabla de rondas
+    Frm_tabla = Frame(ventana_resultados, bg=BG)
+    Frm_tabla.pack(pady=10)
+
+    Label(Frm_tabla, text='RONDA', width=8, font=FONT_MEDIANA, fg=COLOR_GRIS, bg=BG).grid(row=0, column=0, padx=4, pady=2)
+    Label(Frm_tabla, text='VELOCIDAD', width=10, font=FONT_MEDIANA, fg=COLOR_GRIS, bg=BG).grid(row=0, column=1, padx=4, pady=2)
+    Label(Frm_tabla, text='PUNTOS', width=8, font=FONT_MEDIANA, fg=COLOR_GRIS, bg=BG).grid(row=0, column=2, padx=4, pady=2)
+
+    for i in range(3):
+        Label(Frm_tabla, text=f'{i+1}', width=8, font=FONT_MEDIANA, fg=COLOR_TEXTO, bg=BG).grid(row=i+1, column=0, padx=4, pady=2)
+        Label(Frm_tabla, text=f'{i+1}x', width=10, font=FONT_MEDIANA, fg=COLOR_TEXTO, bg=BG).grid(row=i+1, column=1, padx=4, pady=2)
+        Label(Frm_tabla, text=str(puntajes_transmision[i]), width=8, font=FONT_MEDIANA, fg=COLOR_VERDE, bg=BG).grid(row=i+1, column=2, padx=4, pady=2)
+
+    Lbl_total = Label(ventana_resultados, text=f'TOTAL: {total_puntos} puntos', font=(FUENTE, 20, "bold"), fg=COLOR_ACENTO, bg=BG)
+    Lbl_total.pack(pady=(20, 10))
+
+    # Verificar si entra al Top 10
+    top10 = Obtener_top10()
+    posicion_top10 = None
+    for idx, record in enumerate(top10, 1):
+        if record.get('puntos', 0) < total_puntos:
+            posicion_top10 = idx
+            break
+    if posicion_top10 and posicion_top10 <= 10:
+        Lbl_top10 = Label(ventana_resultados, text=f'¡Entras al TOP 10 en la posición #{posicion_top10}!', font=FONT_GRANDE, fg=COLOR_AMARILLO, bg=BG)
+        Lbl_top10.pack(pady=4)
+
+    Lbl_sep2 = Label(ventana_resultados, text='=' * 40, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+    Lbl_sep2.pack(pady=4)
+
+    def Cerrar_y_volver():
+        ventana_resultados.destroy()
+        CambiarPantalla(Contenedor_Pantalla_Menu)
+
+    Btn_volver = Crear_boton(ventana_resultados, 'VOLVER AL MENÚ', Cerrar_y_volver, bg_color=COLOR_ACENTO2)
+    Btn_volver.pack(pady=(10, 20))
+
+def Calcular_puntos_transmision(objetivo, respuesta, velocidad):
+    """Calcula puntos considerando la velocidad (mayor velocidad = más puntos)"""
+    puntos_base = Calcular_puntos(objetivo, respuesta)
+    multiplicador_velocidad = velocidad  # 1x, 2x, 3x
+    return puntos_base * multiplicador_velocidad
+
+Lbl_titulo_trans = Label(Contenedor_trans_scroll, text='TRANSMISIÓN SIMPLE', font=FONT_TITLE, fg=COLOR_ACENTO, bg=BG)
+Lbl_titulo_trans.pack(pady=(24, 4))
+
+Lbl_frase_trans = Label(Contenedor_trans_scroll, text='', font=(FUENTE, 32, "bold"), fg=COLOR_ACENTO, bg=BG)
+Lbl_frase_trans.pack(pady=20)
+
+Lbl_sep_trans = Label(Contenedor_trans_scroll, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+Lbl_sep_trans.pack(pady=4)
+
+Frm_entrada_trans = Frame(Contenedor_trans_scroll, bg=BG)
+Frm_entrada_trans.pack(pady=20)
+
+Lbl_ingreso = Label(Frm_entrada_trans, text='Tu respuesta:', font=FONT_MEDIANA, fg=COLOR_GRIS, bg=BG)
+Lbl_ingreso.pack()
+
+Lbl_texto_trans = Label(Contenedor_trans_scroll, text='', font=(FUENTE, 24, "bold"), fg=COLOR_TEXTO, bg=BG)
+Lbl_texto_trans.pack(pady=10)
+
+Lbl_estado_trans = Label(Contenedor_trans_scroll, text='Presiona ESPACIO para comenzar la transmisión', font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+Lbl_estado_trans.pack(pady=20)
+
+Lbl_sep_trans2 = Label(Contenedor_trans_scroll, text='=' * 60, font=FONT_PUEQUENA, fg=COLOR_GRIS, bg=BG)
+Lbl_sep_trans2.pack(pady=4)
+
+# Botones de control
+Frm_botones_trans = Frame(Contenedor_trans_scroll, bg=BG)
+Frm_botones_trans.pack(pady=(10, 20))
+
+def FUNC_Btn_confirmar_respuesta():
+    if juego_transmision_activo and respuesta_teclado_trans.strip():
+        Finalizar_ronda_transmision()
+
+Btn_confirmar = Crear_boton(Frm_botones_trans, '✓ CONFIRMAR RESPUESTA', FUNC_Btn_confirmar_respuesta, bg_color=COLOR_VERDE, fg_color=BG)
+Btn_confirmar.pack(side=LEFT, padx=8)
+
+def FUNC_Btn_volver_menu():
+    if messagebox.askyesno("Confirmar", "¿Volver al menú principal? Se perderá el progreso actual."):
+        CambiarPantalla(Contenedor_Pantalla_Menu)
+
+Btn_volver_menu = Crear_boton(Frm_botones_trans, '← MENÚ', FUNC_Btn_volver_menu, bg_color=COLOR_ACENTO2)
+Btn_volver_menu.pack(side=LEFT, padx=8)
+
+def Actualizar_display_teclado_trans():
+    global respuesta_teclado_trans
+    secuencia = ''.join(tec_simbolos_trans)
+
+    if secuencia:
+        texto_simbolos = secuencia
+        texto_char = Decodificar_simbolo(secuencia)
+    else:
+        texto_simbolos = "·"
+        texto_char = ""
+
+    texto_actual = ''.join(tec_texto_trans)
+    Lbl_texto_trans.config(text=texto_actual)
+    respuesta_teclado_trans = texto_actual
+
+def Confirmar_caracter_trans():
+    global tec_timer_char_trans
+
+    if tec_timer_char_trans is not None:
+        VENTANA.after_cancel(tec_timer_char_trans)
+        tec_timer_char_trans = None
+
+    secuencia = ''.join(tec_simbolos_trans)
+    if secuencia:
+        char = Decodificar_simbolo(secuencia)
+        tec_texto_trans.append(char)
+        tec_simbolos_trans.clear()
+        Lbl_estado_trans.config(text=f'{secuencia} → {char}', fg=COLOR_VERDE)
+    Actualizar_display_teclado_trans()
+
+def Confirmar_palabra_trans():
+    global tec_timer_palabra_trans
+    tec_timer_palabra_trans = None
+    Confirmar_caracter_trans()
+
+    if tec_texto_trans and tec_texto_trans[-1] != ' ':
+        tec_texto_trans.append(' ')
+
+    Actualizar_display_teclado_trans()
+    Lbl_estado_trans.config(text='ENTER para confirmar respuesta, ESPACIO para continuar editando', fg=COLOR_AMARILLO)
+
+    # Vincular ENTER para confirmar respuesta
+    VENTANA.bind("<Return>", lambda e: Finalizar_ronda_transmision())
+
+def Espacio_presionado_trans(evento):
+    global tec_presionado_trans, tec_t_inicio_trans
+    global tec_timer_char_trans, tec_timer_palabra_trans
+    if tec_presionado_trans:
+        return
+
+    if tec_timer_char_trans is not None:
+        VENTANA.after_cancel(tec_timer_char_trans)
+        tec_timer_char_trans = None
+
+    if tec_timer_palabra_trans is not None:
+        VENTANA.after_cancel(tec_timer_palabra_trans)
+        tec_timer_palabra_trans = None
+
+    tec_presionado_trans = True
+    tec_t_inicio_trans = time.time()
+    Lbl_estado_trans.config(text='● Presionando...', fg=COLOR_ACENTO)
+
+def Espacio_al_soltar_trans(evento):
+    global tec_presionado_trans, tec_timer_char_trans, tec_timer_palabra_trans
+
+    if not tec_presionado_trans:
+        return
+
+    duracion = time.time() - tec_t_inicio_trans
+    tec_presionado_trans = False
+    unidad = Get_unidad()
+
+    if duracion < unidad * 2:
+        simbolo = '.'
+    else:
+        simbolo = '-'
+
+    tec_simbolos_trans.append(simbolo)
+    Actualizar_display_teclado_trans()
+
+    if simbolo == '.':
+        Lbl_estado_trans.config(text=f'Punto ({duracion:.2f}s)', fg=COLOR_GRIS)
+    else:
+        Lbl_estado_trans.config(text=f'Raya ({duracion:.2f}s)', fg=COLOR_GRIS)
+
+    tec_timer_char_trans = VENTANA.after(int(unidad * 3 * 1000), Confirmar_caracter_trans)
+    tec_timer_palabra_trans = VENTANA.after(int(unidad * 7 * 1000), Confirmar_palabra_trans)
+
+VENTANA.bind("<KeyPress-space>", Espacio_presionado_trans)
+VENTANA.bind("<KeyRelease-space>", Espacio_al_soltar_trans)
+
+VENTANA.mainloop()
